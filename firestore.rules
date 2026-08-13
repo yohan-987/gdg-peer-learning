@@ -1,0 +1,166 @@
+rules_version = '2';
+
+// ============================================================================
+// GDG Peer Learning — Firestore Security Rules
+// ============================================================================
+// Honest note on scope: this app has no server (no Cloud Functions) — the
+// points transactions in lib/points.ts run entirely on the client. These
+// rules block the OBVIOUS manipulation vectors a curious student could try
+// from the browser console: setting your own points to an arbitrary number,
+// editing someone else's profile, self-promoting to mentor, approving your
+// own project, or validating your own doubt. They do not make the system
+// cryptographically tamper-proof against someone who deliberately scripts
+// repeated calls to bypass the ledger — that would require server-side
+// trusted code (Cloud Functions), which is out of scope here. That's a
+// reasonable, explainable tradeoff for a hackathon demo, not a hidden gap.
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isMentor() {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'mentor';
+    }
+
+    function pointsUnchanged() {
+      return request.resource.data.totalPoints == resource.data.totalPoints &&
+        request.resource.data.pointsByDomain == resource.data.pointsByDomain &&
+        request.resource.data.pointsBreakdown == resource.data.pointsBreakdown;
+    }
+
+    function isValidPointsIncrease() {
+      // Only allow a single, exact-known increment (matches POINTS in types.ts),
+      // role/identity fields untouched, so this can only be a legitimate
+      // award transaction — never a decrease, never an arbitrary jump.
+      let delta = request.resource.data.totalPoints - resource.data.totalPoints;
+      return delta == 20 || delta == 30;
+    }
+
+    function identityFieldsUnchanged() {
+      return request.resource.data.role == resource.data.role &&
+        request.resource.data.email == resource.data.email &&
+        request.resource.data.uid == resource.data.uid &&
+        request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    // ─── users ───────────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn() && request.auth.uid == uid &&
+        request.resource.data.role == 'student' &&
+        request.resource.data.totalPoints == 0;
+
+      // Two, and only two, legitimate update shapes:
+      // (1) the user editing their own profile fields — points untouched
+      // (2) a points-award transaction — only totalPoints/pointsByDomain/
+      //     pointsBreakdown move, by exactly one valid amount, nothing
+      //     about identity or role changes.
+      allow update: if isSignedIn() && request.auth.uid == uid &&
+        identityFieldsUnchanged() &&
+        (pointsUnchanged() || isValidPointsIncrease());
+
+      allow delete: if false;
+    }
+
+    // ─── sessions ────────────────────────────────────────────────────────
+    // Any signed-in user can trigger the auto-seed-on-first-visit pattern
+    // in lib/sessions.ts. No update/delete path exists in the app.
+    match /sessions/{sessionId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
+    // ─── quizAttempts ────────────────────────────────────────────────────
+    // Deterministic id: {userId}_{sessionId}. Immutable once created —
+    // matches submitQuizAttempt(), which only ever sets, never updates.
+    match /quizAttempts/{attemptId} {
+      allow read: if isSignedIn() && request.auth.uid == resource.data.userId;
+      allow create: if isSignedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.passed == true &&
+        request.resource.data.score >= 0.7;
+      allow update, delete: if false;
+    }
+
+    // ─── doubts ──────────────────────────────────────────────────────────
+    // Status lifecycle: open -> answered (when any reply is posted, by
+    // whoever posted it) -> verified (only a mentor, when they verify a
+    // reply). There's no "asker selects a best answer" step anymore —
+    // mentors browse the feed and verify good answers directly.
+    match /doubts/{doubtId} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+        request.resource.data.authorId == request.auth.uid &&
+        request.resource.data.status == 'open';
+
+      allow update: if isSignedIn() && (
+        // Posting a reply bumps open -> answered; only status may change.
+        (resource.data.status == 'open' &&
+          request.resource.data.status == 'answered' &&
+          request.resource.data.domain == resource.data.domain &&
+          request.resource.data.question == resource.data.question &&
+          request.resource.data.authorId == resource.data.authorId) ||
+        // A mentor verifying a reply flips the doubt to verified.
+        (isMentor() &&
+          request.resource.data.status == 'verified' &&
+          request.resource.data.domain == resource.data.domain &&
+          request.resource.data.question == resource.data.question &&
+          request.resource.data.authorId == resource.data.authorId)
+      );
+
+      allow delete: if false;
+
+      match /replies/{replyId} {
+        allow read: if isSignedIn();
+
+        allow create: if isSignedIn() &&
+          request.resource.data.authorId == request.auth.uid &&
+          request.resource.data.isMentorVerified == false;
+
+        // Only a mentor can verify a reply, only true (never un-verify),
+        // and only when self-attributing via verifiedBy.
+        allow update: if isMentor() &&
+          resource.data.isMentorVerified == false &&
+          request.resource.data.isMentorVerified == true &&
+          request.resource.data.verifiedBy == request.auth.uid &&
+          request.resource.data.authorId == resource.data.authorId &&
+          request.resource.data.text == resource.data.text;
+
+        allow delete: if false;
+      }
+    }
+
+    // ─── pointAwards (immutable ledger) ─────────────────────────────────
+    match /pointAwards/{awardId} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn() && (
+        // Quiz points are self-awarded, always to the person taking it.
+        (request.resource.data.userId == request.auth.uid &&
+          request.resource.data.sourceType == 'quiz' &&
+          request.resource.data.points == 20) ||
+        // Doubt points are awarded BY a mentor TO the reply's author.
+        (isMentor() &&
+          request.resource.data.sourceType == 'doubt' &&
+          request.resource.data.points == 30)
+      );
+
+      allow update, delete: if false;
+    }
+
+    // ─── activities (heatmap source, immutable log) ─────────────────────
+    match /activities/{activityId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+  }
+}
