@@ -16,6 +16,13 @@ import { db } from '@/firebase';
 import type { Doubt, Reply, DomainId, UserProfile } from '@/types';
 
 /**
+ * Fetch all doubts for the main feed (optionally filtered by domain).
+ */
+export async function fetchAllDoubts(domain?: DomainId): Promise<Doubt[]> {
+  return fetchDoubts(domain);
+}
+
+/**
  * Fetch all open or answered doubts for the main feed.
  */
 export async function fetchDoubts(domain?: DomainId): Promise<Doubt[]> {
