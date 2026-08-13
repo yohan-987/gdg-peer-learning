@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CreditCard as Edit3, Check, X, Github, Activity, LogOut, Shield, BookOpen, HandHeart, Trophy, TrendingUp } from 'lucide-react';
+import { CreditCard as Edit3, Check, X, Github, Activity, LogOut, Shield, BookOpen, HandHeart, Trophy, TrendingUp, Clock, ChevronDown, ChevronUp, ClipboardCheck, ShieldCheck, History } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { useToast } from '@/context/ToastContext';
 import { PageShell, Button, Input, Select } from '@/components/ui';
@@ -14,9 +14,11 @@ import {
   type DomainId,
   type DomainPoints,
   type UserProfile,
+  type ActivityRecord,
+  type ActivityType,
 } from '@/types';
 import { fetchActivities, activitiesToHeatmap } from '@/lib/activities';
-import { avatarColor } from '@/lib/format';
+import { avatarColor, timeAgo } from '@/lib/format';
 import { MentorPanel } from '@/components/MentorPanel';
 
 const BRANCHES = [
@@ -53,6 +55,32 @@ function aggregateDomainPoints(
     .sort((a, b) => b.points - a.points);
 }
 
+// ─── activity display helpers ─────────────────────────────────────────────────
+
+const ACTIVITY_LABELS: Record<ActivityType, { label: string; icon: typeof BookOpen }> = {
+  quiz_passed: { label: 'Passed a quiz', icon: ClipboardCheck },
+  doubt_validated: { label: 'Answer verified by mentor', icon: ShieldCheck },
+};
+
+function normalizeActivityType(type: string): ActivityType {
+  if (type === 'quiz_passed' || type === 'doubt_validated') return type;
+  if (type.includes('quiz')) return 'quiz_passed';
+  if (type.includes('doubt') || type.includes('validat')) return 'doubt_validated';
+  return 'quiz_passed';
+}
+
+function toMillis(createdAt: unknown): number {
+  if (!createdAt) return 0;
+  if (typeof createdAt === 'number') return createdAt;
+  if (typeof createdAt === 'object' && createdAt !== null) {
+    const obj = createdAt as Record<string, unknown>;
+    if (typeof obj.toMillis === 'function') return (obj.toMillis as () => number)();
+    if (typeof obj.seconds === 'number') return obj.seconds * 1000;
+    if (typeof obj.nanoseconds === 'number') return Math.floor(obj.nanoseconds / 1e6);
+  }
+  return 0;
+}
+
 // ─── main component ───────────────────────────────────────────────────────────
 
 export default function Profile() {
@@ -62,12 +90,19 @@ export default function Profile() {
   const [editing, setEditing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [heatmapData, setHeatmapData] = useState<Record<string, number>>({});
+  const [activities, setActivities] = useState<ActivityRecord[]>([]);
 
   useEffect(() => {
     if (!user) return;
     fetchActivities(user.uid)
-      .then((activities) => setHeatmapData(activitiesToHeatmap(activities)))
-      .catch(() => setHeatmapData({}));
+      .then((acts) => {
+        setActivities(acts);
+        setHeatmapData(activitiesToHeatmap(acts));
+      })
+      .catch(() => {
+        setActivities([]);
+        setHeatmapData({});
+      });
   }, [user]);
 
   const [name, setName] = useState(profile?.name ?? '');
@@ -185,6 +220,8 @@ export default function Profile() {
             <DomainProgress pointsByDomain={profile.pointsByDomain} />
 
             <TopDomains pointsByDomain={profile.pointsByDomain} />
+
+            <ActivityLedger activities={activities} />
 
             {/* Heatmap */}
             <section className="mb-5 rounded-xl border border-slate-800 bg-slate-900 p-4">
@@ -538,5 +575,137 @@ function TopDomains({ pointsByDomain }: { pointsByDomain: DomainPoints[] }) {
         })}
       </div>
     </section>
+  );
+}
+
+// ─── Activity Ledger / Reputation History ──────────────────────────────────────
+// Read-only vertical timeline of the user's activity records. Shows the
+// most recent 5 by default with a "View All" toggle to expand.
+
+const PREVIEW_COUNT = 5;
+
+function ActivityLedger({ activities }: { activities: ActivityRecord[] }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const sorted = useMemo(() => {
+    return [...activities]
+      .map((a) => ({ ...a, createdAt: toMillis(a.createdAt) }))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }, [activities]);
+
+  const visible = expanded ? sorted : sorted.slice(0, PREVIEW_COUNT);
+  const hasMore = sorted.length > PREVIEW_COUNT;
+
+  return (
+    <section className="mb-5 rounded-xl border border-slate-800 bg-slate-900 p-4">
+      <div className="mb-1 flex items-center gap-2">
+        <History className="h-4 w-4 text-teal-400" />
+        <h2 className="text-sm font-semibold text-slate-200">
+          How I Earned My Reputation
+        </h2>
+      </div>
+      <p className="mb-4 text-[11px] text-slate-500">
+        A record of every point-earning activity.
+      </p>
+
+      {sorted.length === 0 ? (
+        <p className="py-6 text-center text-xs text-slate-500">
+          No reputation activity yet. Pass a quiz or help a peer to start building your reputation.
+        </p>
+      ) : (
+        <>
+          {/* Timeline */}
+          <div className="relative flex flex-col">
+            {visible.map((act, i) => {
+              const isLast = i === visible.length - 1;
+              return (
+                <ActivityTimelineItem
+                  key={act.id}
+                  activity={act}
+                  isLast={isLast}
+                />
+              );
+            })}
+          </div>
+
+          {/* View All toggle */}
+          {hasMore && (
+            <button
+              onClick={() => setExpanded((v) => !v)}
+              className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-950 py-2.5 text-xs font-medium text-slate-300 transition-all hover:border-teal-500/40 hover:text-teal-300"
+            >
+              {expanded ? (
+                <>
+                  Show less
+                  <ChevronUp className="h-3.5 w-3.5" />
+                </>
+              ) : (
+                <>
+                  View all ({sorted.length})
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </>
+              )}
+            </button>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function ActivityTimelineItem({
+  activity,
+  isLast,
+}: {
+  activity: ActivityRecord;
+  isLast: boolean;
+}) {
+  const normalizedType = normalizeActivityType(activity.type);
+  const config = ACTIVITY_LABELS[normalizedType] ?? ACTIVITY_LABELS.quiz_passed;
+  const Icon = config.icon;
+  const domain = DOMAIN_MAP[activity.domain as DomainId];
+  const DomainIcon = domain?.icon;
+  const ts = activity.createdAt;
+
+  return (
+    <div className="flex gap-3">
+      {/* Timeline rail */}
+      <div className="flex flex-col items-center">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-teal-500/30 bg-teal-500/10">
+          <Icon className="h-4 w-4 text-teal-400" />
+        </div>
+        {!isLast && (
+          <div className="mt-1 w-px flex-1 bg-slate-800" />
+        )}
+      </div>
+
+      {/* Card */}
+      <div className={`min-w-0 flex-1 ${isLast ? '' : 'pb-4'}`}>
+        <div className="rounded-lg border border-slate-800 bg-slate-950 px-3.5 py-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-slate-100">
+                {config.label}
+              </p>
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                {domain && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-slate-800 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-400">
+                    {DomainIcon && <DomainIcon className="h-3 w-3 text-teal-400" />}
+                    {domain.name}
+                  </span>
+                )}
+                <span className="flex items-center gap-1 font-mono text-[10px] text-slate-500">
+                  <Clock className="h-3 w-3" />
+                  {ts > 0 ? timeAgo(ts) : 'Recently'}
+                </span>
+              </div>
+            </div>
+            <span className="shrink-0 font-mono text-sm font-bold text-teal-400 tabular-nums">
+              +{activity.points || (normalizedType === 'quiz_passed' ? 20 : 30)}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
